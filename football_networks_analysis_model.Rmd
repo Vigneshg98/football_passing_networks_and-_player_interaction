@@ -1,0 +1,783 @@
+```{r}
+library(dplyr)
+library(ggplot2)
+library(igraph)
+library(tidyr)
+library(randomForest)
+library(nnet)
+library(caret)
+library(pROC)
+```
+
+```{r}
+# Load the data
+
+teams_df <- read.csv("E:/Modules/Dissertation/R_Code/premiership_football_team_ids.csv", header = TRUE)
+
+players_df <- read.csv("E:/Modules/Dissertation/R_Code/premiership_football_player_ids.csv", header = TRUE)
+
+matches_df <- read.csv("E:/Modules/Dissertation/R_Code/premiership_football_matches_ids.csv", header = TRUE)
+
+games_df <- read.csv("E:/Modules/Dissertation/R_Code/games_networks.csv", header = TRUE)
+
+```
+
+```{r}
+# MODEL TYPE 1 WITH SINGLE TEAM (RANDOM FOREST)
+```
+
+```{r}
+
+# Function to calculate total passes by role
+calculate_passes_rf_1 <- function(games_df, players_df, matches_df) {
+  # Merge games_df with players_df to get player roles
+  merged_df <- merge(games_df, players_df, by.x = "from", by.y = "playerId")
+  
+  # Summarize passes by matchId, teamId, and player role
+  passes_summary <- merged_df %>%
+    group_by(matchId, teamId, role) %>%
+    summarize(total_passes = sum(weight), .groups = 'drop')
+  
+  # Reshape the data to have separate columns for each role's passes
+  passes_summary <- passes_summary %>%
+    pivot_wider(names_from = role, values_from = total_passes, values_fill = list(total_passes = 0)) %>%
+    rename(total_passes_by_defenders = Defender,
+           total_passes_by_midfielders = Midfielder,
+           total_passes_by_forwards = Forward)
+  
+  return(passes_summary)
+}
+
+# Function to calculate centrality score of the top player
+# calculate_centrality <- function(games_df) {
+#   centrality_score <- games_df %>%
+#     group_by(matchId, teamId) %>%
+#     summarize(centrality_score_of_top_player = max(weight), .groups = 'drop')
+#   
+#   return(centrality_score)
+# }
+
+# Function to calculate centrality score of the top player based on total_degree
+calculate_centrality_rf_1 <- function(games_df) {
+  g <- graph_from_data_frame(d = games_df, directed = TRUE, vertices = NULL)
+  
+  total_degree <- degree(g, mode = "all")
+  
+  total_degree_df <- data.frame(playerId = as.integer(names(total_degree)), total_degree = total_degree)
+
+  # Join total_degree_df with games_df to get matchId and teamId
+  games_with_degree_df <- games_df %>%
+    select(matchId, teamId, from) %>%
+    distinct() %>%
+    left_join(total_degree_df, by = c("from" = "playerId"))
+  
+  # Identify the player with the highest total_degree for each team in each game
+  top_player_df <- games_with_degree_df %>%
+    group_by(matchId, teamId) %>%
+    filter(total_degree == max(total_degree)) %>%
+    slice(1) %>%  # In case of ties, take the first player
+    ungroup()
+  
+  # Get the centrality score (weight) of the top player
+  centrality_score_df <- games_df %>%
+    semi_join(top_player_df, by = c("matchId", "teamId", "from")) %>%
+    group_by(matchId, teamId) %>%
+    summarize(centrality_score_of_top_player = max(weight), .groups = 'drop')
+  
+  return(centrality_score_df)
+}
+
+# Function to preprocess data
+preprocess_data_rf_1 <- function(matches_df, games_df, players_df) {
+  # Calculate total passes
+  passes_summary <- calculate_passes_rf_1(games_df, players_df, matches_df)
+  
+  # Calculate centrality scores
+  centrality_score <- calculate_centrality_rf_1(games_df)
+  
+  # Merge the passes_summary and centrality_score with matches_df
+  features_df <- matches_df %>%
+    left_join(passes_summary, by = c("matchId", "team_1_teamId" = "teamId")) %>%
+    left_join(centrality_score, by = c("matchId", "team_1_teamId" = "teamId"))
+  
+  # Calculate total number of passes
+  features_df <- features_df %>%
+    mutate(total_number_of_passes = total_passes_by_defenders + total_passes_by_midfielders + total_passes_by_forwards)
+  
+  # Create the target variable 'outcome'
+  features_df <- features_df %>%
+    mutate(outcome = case_when(
+      team_1_score > team_2_score ~ "Win",
+      team_1_score < team_2_score ~ "Lose",
+      TRUE ~ "Draw"
+    ))
+  
+  features_df <- features_df %>%
+    mutate(outcome = case_when(
+      team_1_score > team_2_score ~ "Win",
+      team_1_score < team_2_score ~ "Not Win",
+      TRUE ~ "Not Win"
+    ))
+  
+  # Select relevant columns and ensure numeric types
+  features_df <- features_df %>%
+    select(team_1_teamId, team_1_side, total_number_of_passes, total_passes_by_defenders, 
+           total_passes_by_midfielders, total_passes_by_forwards, centrality_score_of_top_player, outcome) %>%
+    mutate(across(c(total_number_of_passes, total_passes_by_defenders, 
+                    total_passes_by_midfielders, total_passes_by_forwards, 
+                    centrality_score_of_top_player), as.numeric),
+           team_1_side = as.factor(team_1_side),
+           outcome = as.factor(outcome))
+  
+  return(features_df)
+}
+
+# # Function to train the random forest model
+# train_model <- function(features_df) {
+#   set.seed(123) # For reproducibility
+#   
+#   # Split the data into training and testing sets
+#   train_indices <- sample(seq_len(nrow(features_df)), size = 0.7 * nrow(features_df))
+#   train_data <- features_df[train_indices, ]
+#   test_data <- features_df[-train_indices, ]
+#   
+#   # Train the random forest model
+#   rf_model <- randomForest(outcome ~ ., data = train_data, importance = TRUE)
+#   
+#   return(list(model = rf_model, test_data = test_data))
+# }
+
+# Function to train the random forest model
+train_model_rf_1 <- function(features_df) {
+  set.seed(123) # For reproducibility
+  
+  # Create an empty data frame for the test set
+  test_data <- data.frame()
+  
+  # Get unique team IDs
+  unique_teams <- unique(features_df$team_1_teamId)
+  
+  # Loop through each team and sample 2 rows for test data
+  for (team in unique_teams) {
+    team_data <- features_df %>% filter(team_1_teamId == team)
+    
+    # Sample 2 rows for test data
+    sampled_rows <- team_data %>% sample_n(min(2, nrow(team_data)), replace = FALSE)
+    
+    # Add sampled rows to the test_data
+    test_data <- bind_rows(test_data, sampled_rows)
+  }
+  
+  # The training data is everything not in test_data
+  train_data <- features_df %>% anti_join(test_data, by = c("team_1_teamId", "total_number_of_passes", "total_passes_by_defenders", 
+                                                             "total_passes_by_midfielders", "total_passes_by_forwards", 
+                                                             "centrality_score_of_top_player", "outcome"))
+  
+  # Train the random forest model
+  rf_model <- randomForest(outcome ~ ., data = train_data, importance = TRUE)
+  
+  return(list(model = rf_model, test_data = test_data, train_data = train_data))
+}
+
+# Function to predict outcomes using the trained model
+predict_outcomes_rf_1 <- function(rf_model, data) {
+  predictions <- predict(rf_model, data)
+  return(predictions)
+}
+
+# Main execution
+# Preprocess the data
+features_df_rf_1 <- preprocess_data_rf_1(matches_df, games_df, players_df)
+
+# Train the model
+model_results_rf_1 <- train_model_rf_1(features_df_rf_1)
+model_rf_1 <- model_results_rf_1$model
+test_data_rf_1 <- model_results_rf_1$test_data
+train_data_rf_1 <- model_results_rf_1$train_data
+
+# Predict outcomes
+predictions_rf_1 <- predict_outcomes_rf_1(model_rf_1, test_data_rf_1)
+
+test_results_rf_1 <- data.frame(Actual = test_data_rf_1$outcome, Predicted = predictions_rf_1)
+
+# Calculate accuracy
+accuracy_rf_1 <- sum(test_results_rf_1$Actual == test_results_rf_1$Predicted) / nrow(test_results_rf_1)
+  
+# Print the predictions and actual outcomes for comparison
+print(test_results_rf_1)
+
+# Print accuracy
+print(paste("Accuracy: ", round(accuracy_rf_1 * 100, 2), "%", sep = ""))
+
+```
+
+```{r}
+predictions_rf_1 <- factor(predictions_rf_1, levels = levels(test_data_rf_1$outcome))
+test_data_rf_1$outcome <- factor(test_data_rf_1$outcome, levels = levels(predictions_rf_1))
+
+# Print the confusion matrix
+conf_matrix_rf_1 <- confusionMatrix(predictions_rf_1, test_data_rf_1$outcome)
+print(conf_matrix_rf_1)
+
+
+conf_matrix_table_rf_1 <- conf_matrix_rf_1$table
+
+# Calculate Accuracy, Precision, Recall, and F1-Score
+accuracy_rf_1 <- sum(diag(conf_matrix_table_rf_1)) / sum(conf_matrix_table_rf_1)
+precision_rf_1 <- diag(conf_matrix_table_rf_1) / rowSums(conf_matrix_table_rf_1)
+recall_rf_1 <- diag(conf_matrix_table_rf_1) / colSums(conf_matrix_table_rf_1)
+f1_score_rf_1 <- 2 * (precision_rf_1 * recall_rf_1) / (precision_rf_1 + recall_rf_1)
+
+# Print the metrics
+metrics_rf_1 <- data.frame(
+  Class = levels(predictions_rf_1),
+  Precision = precision_rf_1,
+  Recall = recall_rf_1,
+  F1_Score = f1_score_rf_1
+)
+
+cat("Overall Accuracy: ", round(accuracy_rf_1 * 100, 2), "%\n", sep = "")
+
+print(metrics_rf_1)
+```
+
+```{r}
+# Get the importance of each feature
+importance_df_rf_1 <- as.data.frame(importance(model_rf_1))
+importance_df_rf_1$Feature <- rownames(importance_df_rf_1)
+importance_df_rf_1 <- importance_df_rf_1 %>%
+  arrange(desc(MeanDecreaseGini)) # Sorting by importance
+
+# Plotting
+ggplot(importance_df_rf_1, aes(x = reorder(Feature, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity") +
+  coord_flip() + # Flip coordinates for better readability
+  labs(title = "Feature Importance (Random Forest)",
+       x = "Features",
+       y = "Importance Score") +
+  theme_minimal()
+```
+
+```{r}
+# MODEL TYPE 2 WITH TWO TEAMS (RANDOM FOREST)
+```
+
+```{r}
+
+# Function to calculate total passes by role
+calculate_passes_rf_2 <- function(games_df, players_df) {
+  # Merge games_df with players_df to get player roles
+  merged_df <- merge(games_df, players_df, by.x = "from", by.y = "playerId")
+  
+  # Summarize passes by matchId, teamId, and player role
+  passes_summary <- merged_df %>%
+    group_by(matchId, teamId, role) %>%
+    summarize(total_passes = sum(weight), .groups = 'drop')
+  
+  # Reshape the data to have separate columns for each role's passes
+  passes_summary <- passes_summary %>%
+    pivot_wider(names_from = role, values_from = total_passes, values_fill = list(total_passes = 0)) %>%
+    rename(total_passes_by_defenders = Defender,
+           total_passes_by_midfielders = Midfielder,
+           total_passes_by_forwards = Forward)
+  
+  return(passes_summary)
+}
+
+# Function to calculate centrality score of the top player based on total_degree
+calculate_centrality_rf_2 <- function(games_df) {
+  g <- graph_from_data_frame(d = games_df, directed = TRUE, vertices = NULL)
+  
+  total_degree <- degree(g, mode = "all")
+  
+  total_degree_df <- data.frame(playerId = as.integer(names(total_degree)), total_degree = total_degree)
+
+  # Join total_degree_df with games_df to get matchId and teamId
+  games_with_degree_df <- games_df %>%
+    select(matchId, teamId, from) %>%
+    distinct() %>%
+    left_join(total_degree_df, by = c("from" = "playerId"))
+  
+  # Identify the player with the highest total_degree for each team in each game
+  top_player_df <- games_with_degree_df %>%
+    group_by(matchId, teamId) %>%
+    filter(total_degree == max(total_degree)) %>%
+    slice(1) %>%  # In case of ties, take the first player
+    ungroup()
+  
+  # Get the centrality score (weight) of the top player
+  centrality_score_df <- games_df %>%
+    semi_join(top_player_df, by = c("matchId", "teamId", "from")) %>%
+    group_by(matchId, teamId) %>%
+    summarize(centrality_score_of_top_player = max(weight), .groups = 'drop')
+  
+  return(centrality_score_df)
+}
+
+# Function to preprocess data
+preprocess_data_rf_2 <- function(matches_df, games_df, players_df) {
+  # Calculate total passes
+  passes_summary <- calculate_passes_rf_2(games_df, players_df)
+  
+  # Calculate centrality scores
+  centrality_score <- calculate_centrality_rf_2(games_df)
+  
+  # Merge the passes_summary and centrality_score with matches_df
+  features_df <- matches_df %>%
+    left_join(passes_summary, by = c("matchId", "team_1_teamId" = "teamId")) %>%
+    left_join(centrality_score, by = c("matchId", "team_1_teamId" = "teamId")) %>%
+    left_join(passes_summary, by = c("matchId", "team_2_teamId" = "teamId"), suffix = c("_team1", "_team2")) %>%
+    left_join(centrality_score, by = c("matchId", "team_2_teamId" = "teamId"), suffix = c("_team1", "_team2"))
+  
+  # Calculate total number of passes for both teams
+  features_df <- features_df %>%
+    mutate(total_number_of_passes_team1 = total_passes_by_defenders_team1 + total_passes_by_midfielders_team1 + total_passes_by_forwards_team1,
+           total_number_of_passes_team2 = total_passes_by_defenders_team2 + total_passes_by_midfielders_team2 + total_passes_by_forwards_team2,
+           proportion_of_passes_team1 = total_number_of_passes_team1 / total_number_of_passes_team2)
+  
+  # Create the target variable 'outcome' as Win or Not Win
+  features_df <- features_df %>%
+    mutate(outcome = ifelse(team_1_score > team_2_score, "Win", "Not Win"))
+  
+  # features_df <- features_df %>%
+  #   mutate(outcome = case_when(
+  #     team_1_score > team_2_score ~ "Win",
+  #     team_1_score < team_2_score ~ "Lose",
+  #     TRUE ~ "Draw"
+  #   ))
+  
+  # Select relevant columns and ensure numeric types
+  features_df <- features_df %>%
+    select(team_1_teamId, team_2_teamId, team_1_side, total_number_of_passes_team1, total_passes_by_defenders_team1, 
+           total_passes_by_midfielders_team1, total_passes_by_forwards_team1, centrality_score_of_top_player_team1,
+           total_number_of_passes_team2, total_passes_by_defenders_team2, total_passes_by_midfielders_team2, 
+           total_passes_by_forwards_team2, centrality_score_of_top_player_team2, proportion_of_passes_team1, outcome) %>%
+    mutate(across(c(total_number_of_passes_team1, total_passes_by_defenders_team1, 
+                    total_passes_by_midfielders_team1, total_passes_by_forwards_team1, 
+                    centrality_score_of_top_player_team1, total_number_of_passes_team2, 
+                    total_passes_by_defenders_team2, total_passes_by_midfielders_team2, 
+                    total_passes_by_forwards_team2, centrality_score_of_top_player_team2, 
+                    proportion_of_passes_team1), as.numeric),
+           team_1_side = as.factor(team_1_side),
+           outcome = as.factor(outcome))
+  
+  return(features_df)
+}
+
+# Function to train the random forest model
+train_model_rf_2 <- function(features_df) {
+  set.seed(123) # For reproducibility
+  
+  # Create an empty data frame for the test set
+  test_data <- data.frame()
+  
+  # Get unique team IDs
+  unique_teams <- unique(features_df$team_1_teamId)
+  
+  # Loop through each team and sample 2 rows for test data
+  for (team in unique_teams) {
+    team_data <- features_df %>% filter(team_1_teamId == team)
+    
+    # Sample 2 rows for test data
+    sampled_rows <- team_data %>% sample_n(min(2, nrow(team_data)), replace = FALSE)
+    
+    # Add sampled rows to the test_data
+    test_data <- bind_rows(test_data, sampled_rows)
+  }
+  
+  # The training data is everything not in test_data
+  train_data <- features_df %>% anti_join(test_data, by = c("team_1_teamId", "team_2_teamId", "total_number_of_passes_team1", "total_passes_by_defenders_team1", 
+                                                             "total_passes_by_midfielders_team1", "total_passes_by_forwards_team1", 
+                                                             "centrality_score_of_top_player_team1", "total_number_of_passes_team2", 
+                                                             "total_passes_by_defenders_team2", "total_passes_by_midfielders_team2", 
+                                                             "total_passes_by_forwards_team2", "centrality_score_of_top_player_team2", 
+                                                             "proportion_of_passes_team1", "outcome"))
+  
+  # Train the random forest model
+  rf_model <- randomForest(outcome ~ ., data = train_data, importance = TRUE)
+  
+  return(list(model = rf_model, test_data = test_data, train_data = train_data))
+}
+
+# Function to predict outcomes using the trained model
+predict_outcomes_rf_2 <- function(rf_model, data) {
+  predictions <- predict(rf_model, data)
+  return(predictions)
+}
+
+# Main execution
+# Preprocess the data
+features_df_rf_2 <- preprocess_data_rf_2(matches_df, games_df, players_df)
+
+# Train the model
+model_results_rf_2 <- train_model_rf_2(features_df_rf_2)
+model_rf_2 <- model_results_rf_2$model
+test_data_rf_2 <- model_results_rf_2$test_data
+train_data_rf_2 <- model_results_rf_2$train_data
+
+# Predict outcomes using train_data for verification
+train_predictions_rf_2 <- predict_outcomes_rf_2(model_rf_2, train_data_rf_2)
+
+# Create a results data frame to compare actual and predicted outcomes for train_data
+train_results_rf_2 <- data.frame(Actual = train_data_rf_2$outcome, Predicted = train_predictions_rf_2)
+
+# Print the predictions and actual outcomes for train_data for comparison
+print(train_results_rf_2)
+
+# Predict outcomes using test_data
+test_predictions_rf_2 <- predict_outcomes_rf_2(model_rf_2, test_data_rf_2)
+
+# Create a results data frame to compare actual and predicted outcomes for test_data
+test_results_rf_2 <- data.frame(Actual = test_data_rf_2$outcome, Predicted = test_predictions_rf_2)
+
+# Calculate accuracy for test_data
+test_accuracy_rf_2 <- sum(test_results_rf_2$Actual == test_results_rf_2$Predicted) / nrow(test_results_rf_2)
+
+# Print the predictions and actual outcomes for test_data for comparison
+print(test_results_rf_2)
+
+# Print test accuracy
+print(paste("Test Accuracy: ", round(test_accuracy_rf_2 * 100, 2), "%", sep = ""))
+
+```
+
+```{r}
+# Convert predictions and actual outcomes to factor with same levels
+test_predictions_rf_2 <- factor(test_predictions_rf_2, levels = levels(test_data_rf_2$outcome))
+test_data_rf_2$outcome <- factor(test_data_rf_2$outcome, levels = levels(test_predictions_rf_2))
+
+# Print the confusion matrix
+conf_matrix_rf_2 <- confusionMatrix(test_predictions_rf_2, test_data_rf_2$outcome)
+print(conf_matrix_rf_2)
+
+conf_matrix_table_rf_2 <- conf_matrix_rf_2$table
+
+# Calculate Accuracy, Precision, Recall, and F1-Score
+accuracy_rf_2 <- sum(diag(conf_matrix_table_rf_2)) / sum(conf_matrix_table_rf_2)
+precision_rf_2 <- diag(conf_matrix_table_rf_2) / rowSums(conf_matrix_table_rf_2)
+recall_rf_2 <- diag(conf_matrix_table_rf_2) / colSums(conf_matrix_table_rf_2)
+f1_score_rf_2 <- 2 * (precision_rf_2 * recall_rf_2) / (precision_rf_2 + recall_rf_2)
+
+# Print the metrics
+metrics_rf_2 <- data.frame(
+  Class = levels(test_predictions_rf_2),
+  Precision = precision_rf_2,
+  Recall = recall_rf_2,
+  F1_Score = f1_score_rf_2
+)
+
+cat("Overall Accuracy: ", round(accuracy_rf_2 * 100, 2), "%\n", sep = "")
+
+print(metrics_rf_2)
+```
+
+```{r}
+# Plot feature importance
+importance_df_rf_2 <- as.data.frame(importance(model_rf_2))
+importance_df_rf_2$Feature <- rownames(importance_df_rf_2)
+importance_df_rf_2 <- importance_df_rf_2 %>% arrange(desc(MeanDecreaseGini))
+
+ggplot(importance_df_rf_2, aes(x = reorder(Feature, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Feature Importance (Random Forest)", x = "Feature", y = "Importance Score")
+
+```
+
+```{r}
+# MODEL TYPE 2 WITH TWO TEAMS (MULTINOMIAL REGRESSION)
+```
+
+```{r}
+
+# Function to calculate total passes by role
+calculate_passes_mr <- function(games_df, players_df) {
+  merged_df <- merge(games_df, players_df, by.x = "from", by.y = "playerId")
+  
+  passes_summary <- merged_df %>%
+    group_by(matchId, teamId, role) %>%
+    summarize(total_passes = sum(weight), .groups = 'drop') %>%
+    pivot_wider(names_from = role, values_from = total_passes, values_fill = list(total_passes = 0)) %>%
+    rename(total_passes_by_defenders = Defender,
+           total_passes_by_midfielders = Midfielder,
+           total_passes_by_forwards = Forward)
+  
+  return(passes_summary)
+}
+
+# Function to calculate centrality score of the top player based on total_degree
+calculate_centrality_mr <- function(games_df) {
+  g <- graph_from_data_frame(d = games_df, directed = TRUE, vertices = NULL)
+  total_degree <- degree(g, mode = "all")
+  total_degree_df <- data.frame(playerId = as.integer(names(total_degree)), total_degree = total_degree)
+  
+  games_with_degree_df <- games_df %>%
+    select(matchId, teamId, from) %>%
+    distinct() %>%
+    left_join(total_degree_df, by = c("from" = "playerId"))
+  
+  top_player_df <- games_with_degree_df %>%
+    group_by(matchId, teamId) %>%
+    filter(total_degree == max(total_degree)) %>%
+    slice(1) %>%
+    ungroup()
+  
+  centrality_score_df <- games_df %>%
+    semi_join(top_player_df, by = c("matchId", "teamId", "from")) %>%
+    group_by(matchId, teamId) %>%
+    summarize(centrality_score_of_top_player = max(weight), .groups = 'drop')
+  
+  return(centrality_score_df)
+}
+
+# Function to preprocess data
+preprocess_data_mr <- function(matches_df, games_df, players_df) {
+  passes_summary <- calculate_passes_mr(games_df, players_df)
+  centrality_score <- calculate_centrality_mr(games_df)
+  
+  features_df <- matches_df %>%
+    left_join(passes_summary, by = c("matchId", "team_1_teamId" = "teamId"), suffix = c("_team1", "_team2")) %>%
+    left_join(centrality_score, by = c("matchId", "team_1_teamId" = "teamId"), suffix = c("_team1", "_team2")) %>%
+    left_join(passes_summary, by = c("matchId", "team_2_teamId" = "teamId"), suffix = c("_team1", "_team2")) %>%
+    left_join(centrality_score, by = c("matchId", "team_2_teamId" = "teamId"), suffix = c("_team1", "_team2"))
+  
+  features_df <- features_df %>%
+    mutate(total_number_of_passes_team1 = total_passes_by_defenders_team1 + total_passes_by_midfielders_team1 + total_passes_by_forwards_team1,
+           total_number_of_passes_team2 = total_passes_by_defenders_team2 + total_passes_by_midfielders_team2 + total_passes_by_forwards_team2,
+           pass_proportion_team1 = total_number_of_passes_team1 / total_number_of_passes_team2,
+           outcome = case_when(
+             team_1_score > team_2_score ~ "Win",
+             team_1_score < team_2_score ~ "Not Win",
+             TRUE ~ "Not Win"
+           ))
+  
+  # Ensure all columns exist by replacing missing columns with NA
+  features_df <- features_df %>%
+    mutate(
+      total_passes_by_defenders_team1 = ifelse(is.na(total_passes_by_defenders_team1), 0, total_passes_by_defenders_team1),
+      total_passes_by_midfielders_team1 = ifelse(is.na(total_passes_by_midfielders_team1), 0, total_passes_by_midfielders_team1),
+      total_passes_by_forwards_team1 = ifelse(is.na(total_passes_by_forwards_team1), 0, total_passes_by_forwards_team1),
+      centrality_score_of_top_player_team1 = ifelse(is.na(centrality_score_of_top_player_team1), 0, centrality_score_of_top_player_team1),
+      total_passes_by_defenders_team2 = ifelse(is.na(total_passes_by_defenders_team2), 0, total_passes_by_defenders_team2),
+      total_passes_by_midfielders_team2 = ifelse(is.na(total_passes_by_midfielders_team2), 0, total_passes_by_midfielders_team2),
+      total_passes_by_forwards_team2 = ifelse(is.na(total_passes_by_forwards_team2), 0, total_passes_by_forwards_team2),
+      centrality_score_of_top_player_team2 = ifelse(is.na(centrality_score_of_top_player_team2), 0, centrality_score_of_top_player_team2)
+    )
+  
+  features_df <- features_df %>%
+    select(team_1_teamId, team_2_teamId, team_1_side, team_2_side, total_number_of_passes_team1, total_passes_by_defenders_team1, 
+           total_passes_by_midfielders_team1, total_passes_by_forwards_team1, centrality_score_of_top_player_team1,
+           total_number_of_passes_team2, total_passes_by_defenders_team2, 
+           total_passes_by_midfielders_team2, total_passes_by_forwards_team2, centrality_score_of_top_player_team2,
+           pass_proportion_team1, outcome) %>%
+    mutate(across(c(total_number_of_passes_team1, total_passes_by_defenders_team1, 
+                    total_passes_by_midfielders_team1, total_passes_by_forwards_team1, 
+                    centrality_score_of_top_player_team1, total_number_of_passes_team2, total_passes_by_defenders_team2, 
+                    total_passes_by_midfielders_team2, total_passes_by_forwards_team2, 
+                    centrality_score_of_top_player_team2, pass_proportion_team1), as.numeric),
+           team_1_side = as.factor(team_1_side),
+           team_2_side = as.factor(team_2_side),
+           outcome = factor(outcome, levels = c("Win", "Not Win")))
+  
+  return(features_df)
+}
+
+# Function to train the multinomial regression model
+train_model_mr <- function(features_df) {
+  set.seed(123)
+  
+  test_data <- data.frame()
+  unique_teams <- unique(features_df$team_1_teamId)
+  
+  for (team in unique_teams) {
+    team_data <- features_df %>% filter(team_1_teamId == team)
+    sampled_rows <- team_data %>% sample_n(min(2, nrow(team_data)), replace = FALSE)
+    test_data <- bind_rows(test_data, sampled_rows)
+  }
+  
+  train_data <- features_df %>% anti_join(test_data, by = c("team_1_teamId", "team_2_teamId", "total_number_of_passes_team1", 
+                                                            "total_passes_by_defenders_team1", "total_passes_by_midfielders_team1", 
+                                                            "total_passes_by_forwards_team1", "centrality_score_of_top_player_team1", 
+                                                            "total_number_of_passes_team2", "total_passes_by_defenders_team2", 
+                                                            "total_passes_by_midfielders_team2", "total_passes_by_forwards_team2", 
+                                                            "centrality_score_of_top_player_team2", "pass_proportion_team1", "outcome"))
+  
+  multinom_model <- multinom(outcome ~ ., data = train_data)
+  
+  return(list(model = multinom_model, test_data = test_data, train_data = train_data))
+}
+
+# Function to predict outcomes using the trained multinomial model
+predict_outcomes_mr <- function(multinom_model, test_data) {
+  predictions <- predict(multinom_model, test_data)
+  return(predictions)
+}
+
+# Function to calculate MacFadden's R² for multinomial regression
+calculate_macfadden_r2 <- function(model, data) {
+  
+  # Extract the null model log-likelihood
+  null_model <- update(model, . ~ 1, data = data)
+  
+  # Extract the fitted model log-likelihood
+  ll_null <- logLik(null_model)
+  ll_model <- logLik(model)
+  
+  # Calculate McFadden's R²
+  mcfadden_r2 <- 1 - (ll_model / ll_null)
+  return(mcfadden_r2)
+}
+
+# Function to calculate Nagelkerke's R² for a multinomial regression
+calculate_nagelkerke_r2 <- function(model, data) {
+  
+  # Log-likelihood of the fitted model
+  log_likelihood_model <- logLik(model)
+  
+  # Log-likelihood of the null model (intercept only model)
+  null_model <- multinom(outcome ~ 1, data = data)
+  log_likelihood_null <- logLik(null_model)
+  
+  # Number of observations
+  n <- nrow(data)
+  
+  # Cox & Snell R²
+  r2_cox_snell <- 1 - exp((2 / n) * (log_likelihood_null - log_likelihood_model))
+  
+  # Maximum possible Cox & Snell R² value
+  r2_max <- 1 - exp((2 / n) * log_likelihood_null)
+  
+  # Nagelkerke's R²
+  r2_nagelkerke <- r2_cox_snell / r2_max
+  
+  return(r2_nagelkerke)
+}
+
+# Main execution
+features_df_mr <- preprocess_data_mr(matches_df, games_df, players_df)
+
+# Train the model
+model_results_mr <- train_model_mr(features_df_mr)
+model_mr <- model_results_mr$model
+test_data_mr <- model_results_mr$test_data
+train_data_mr <- model_results_mr$train_data
+
+# Calculate pseudo-R²
+pseudo_r2 <- calculate_macfadden_r2(model_mr, train_data_mr)
+print(paste("McFadden's R²: ", round(pseudo_r2, 4)))
+
+nagelkerke_r2 <- calculate_nagelkerke_r2(model_mr, train_data_mr)
+print(paste("Nagelkerke's R²: ", round(nagelkerke_r2, 4), sep = ""))
+
+# Predict outcomes
+predictions_mr <- predict_outcomes_mr(model_mr, test_data_mr)
+test_results_mr <- data.frame(Actual = test_data_mr$outcome, Predicted = predictions_mr)
+
+# Calculate accuracy
+accuracy_mr <- sum(test_results_mr$Actual == test_results_mr$Predicted) / nrow(test_results_mr)
+print(test_results_mr)
+print(paste("Accuracy: ", round(accuracy_mr * 100, 2), "%", sep = ""))
+
+# Feature importance for multinomial regression
+coef_summary_mr <- summary(model_mr)
+z_values_mr <- coef_summary_mr$coefficients / coef_summary_mr$standard.errors
+z_values_df_mr <- as.data.frame(z_values_mr)
+z_values_df_mr$Feature <- rownames(z_values_df_mr)
+z_values_df_mr <- gather(z_values_df_mr, key = "Outcome", value = "Z_value", -Feature)
+
+# Filter out rows corresponding to the intercept
+z_values_df_mr <- z_values_df_mr[!grepl("(Intercept)", z_values_df_mr$Outcome), ]
+
+ggplot(z_values_df_mr, aes(x = Feature, y = abs(Z_value), fill = Outcome)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Feature Importance (Multinomial Regression)", y = "Absolute Z-value")
+
+```
+
+```{r}
+# Convert predictions and actual outcomes to factor with same levels
+predictions_mr <- factor(predictions_mr, levels = levels(test_data_mr$outcome))
+test_data_mr$outcome <- factor(test_data_mr$outcome, levels = levels(predictions_mr))
+
+# Print the confusion matrix
+conf_matrix <- confusionMatrix(predictions_mr, test_data_mr$outcome)
+print(conf_matrix)
+
+conf_matrix_table <- conf_matrix$table
+
+# Calculate Accuracy, Precision, Recall, and F1-Score
+accuracy <- sum(diag(conf_matrix_table)) / sum(conf_matrix_table)
+precision <- diag(conf_matrix_table) / rowSums(conf_matrix_table)
+recall <- diag(conf_matrix_table) / colSums(conf_matrix_table)
+f1_score <- 2 * (precision * recall) / (precision + recall)
+
+# Print the metrics
+metrics <- data.frame(
+  Class = levels(predictions_mr),
+  Precision = precision,
+  Recall = recall,
+  F1_Score = f1_score
+)
+
+cat("Overall Accuracy: ", round(accuracy * 100, 2), "%\n", sep = "")
+
+print(metrics)
+```
+
+```{r}
+
+# Function to calculate and plot ROC curves for multinomial regression
+plot_roc_and_calculate_auc <- function(multinom_model, test_data, response_var) {
+  # Predict probabilities
+  prob_predictions <- predict(multinom_model, test_data, type = "probs")
+  
+  # Convert response variable to factor if not already
+  test_data[[response_var]] <- as.factor(test_data[[response_var]])
+  
+  # Ensure the predicted probabilities have the correct dimensions
+  if (is.vector(prob_predictions)) {
+    prob_predictions <- matrix(prob_predictions, nrow = length(prob_predictions), ncol = length(levels(test_data[[response_var]])))
+    colnames(prob_predictions) <- levels(test_data[[response_var]])
+  }
+  
+  # Initialize a list to store ROC curves and AUC values
+  roc_curves <- list()
+  auc_values <- numeric(length(levels(test_data[[response_var]])))
+  
+  # Plot ROC curves for each class
+  for (i in 1:length(levels(test_data[[response_var]]))) {
+    class <- levels(test_data[[response_var]])[i]
+    
+    # Create binary outcome variable for the current class
+    binary_outcome <- ifelse(test_data[[response_var]] == class, 1, 0)
+    
+    # Check if the class exists in predictions
+    if (!class %in% colnames(prob_predictions)) {
+      stop(paste("Class", class, "not found in predictions"))
+    }
+    
+    # Compute ROC curve
+    roc_curve <- roc(binary_outcome, prob_predictions[, class])
+    
+    # Store ROC curve and AUC value
+    roc_curves[[class]] <- roc_curve
+    auc_values[i] <- auc(roc_curve)
+    
+    # Plot ROC curve
+    plot(roc_curve, col = i, main = "ROC Curves for Multinomial Regression", add = ifelse(i == 1, FALSE, TRUE))
+  }
+  
+  # Add legend to the plot
+  legend("bottomright", legend = levels(test_data[[response_var]]), col = 1:length(levels(test_data[[response_var]])), lty = 1)
+  
+  # Create a named vector of AUC values
+  auc_values <- setNames(auc_values, levels(test_data[[response_var]]))
+  
+  return(list(roc_curves = roc_curves, auc_values = auc_values))
+}
+
+roc_and_auc <- plot_roc_and_calculate_auc(model_mr, test_data_mr, "outcome")
+print(roc_and_auc$auc_values)
+
+```

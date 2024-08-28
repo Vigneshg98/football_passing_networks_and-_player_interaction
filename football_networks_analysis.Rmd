@@ -1,0 +1,1289 @@
+---
+title: "football_networks_analysis"
+output: html_document
+date: "2024-06-05"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load necessary libraries
+library(igraph)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(reshape2)
+library(kableExtra)
+library(cowplot)
+library(corrplot)
+
+```
+
+```{r}
+# Load the data
+
+teams_df <- read.csv("E:/Modules/Dissertation/R_Code/premiership_football_team_ids.csv", header = TRUE)
+
+players_df <- read.csv("E:/Modules/Dissertation/R_Code/premiership_football_player_ids.csv", header = TRUE)
+
+matches_df <- read.csv("E:/Modules/Dissertation/R_Code/premiership_football_matches_ids.csv", header = TRUE)
+
+games_df <- read.csv("E:/Modules/Dissertation/R_Code/games_networks.csv", header = TRUE)
+
+```
+
+```{r}
+teams_visulisation <- function(teams_df) {
+  # Bar Chart for Distribution of Teams by City
+  plot_teams_by_city <- ggplot(teams_df, aes(x = city)) +
+    geom_bar(fill = "red") +
+    xlab("City") +
+    ylab("Number of Teams") +
+    ggtitle("Distribution of Teams by City") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  plot_teams_by_city
+
+}
+```
+
+```{r}
+# Function to create the overall passing network graph
+create_overall_passing_network <- function(games_df) {
+  
+  # Create a graph object from the games dataframe
+  g <- graph_from_data_frame(d = games_df, directed = TRUE, vertices = NULL)
+  
+  # Plot the overall passing network graph
+  plot(g, vertex.label = V(g)$name, main = "Overall Passing Network Graph")
+}
+
+```
+
+```{r}
+# Function to create filtered passing network for a specific match
+create_filtered_passing_network <- function(games_df, match_id) {
+  
+  # Filter the games dataframe for the specified match
+  match_games <- games_df %>% filter(matchId == match_id)
+  
+  # Create a graph object from the filtered data
+  g <- graph_from_data_frame(d = match_games, directed = TRUE, vertices = NULL)
+  
+  # Plot the filtered passing network graph
+  plot(g, vertex.label = V(g)$name, main = paste("Passing Network for Match", match_id))
+}
+
+```
+
+```{r}
+# Function to plot player interaction counts
+plot_player_interaction_counts <- function(games_df, match_id) {
+  
+  # Filter the games dataframe for the specified match
+  match_games <- games_df %>% filter(matchId == match_id)
+  
+  games_graph <- graph_from_data_frame(d = match_games, directed = TRUE, vertices = NULL)
+  node_degree <- degree(games_graph, mode = "all")
+
+  # Create a dataframe for plotting
+  degree_df <- data.frame(playerId = names(node_degree), degree = node_degree) %>%
+    left_join(players_df %>% mutate(playerId = as.character(playerId)), by = "playerId")
+  
+  # Plot the bar plot
+  ggplot(degree_df, aes(x = reorder(paste(lastName), -degree), y = degree)) +
+    geom_bar(stat = "identity", fill = "red") +
+    xlab("Player") +
+    ylab("Number of Passes Involving Each Player") +
+    ggtitle("Player Interaction Counts") +
+    theme(
+      axis.text.x = element_text(angle = 60, hjust = 1, size = 12), # Increase font size for x axis
+      axis.text.y = element_text(size = 12), # Increase font size for y axis
+      axis.title.x = element_text(size = 14), # Increase font size for x axis title
+      axis.title.y = element_text(size = 14), # Increase font size for y axis title
+      plot.title = element_text(size = 16) # Increase font size for plot title
+    )
+}
+
+```
+
+```{r}
+# Function to plot the distribution of player roles
+plot_player_role_distribution <- function(players_df) {
+  
+  ggplot(players_df, aes(x = role)) +
+    geom_bar(fill = 'red') +
+    labs(title = "Distribution of Player Roles", x = "Player Role", y = "Count") +
+    theme_minimal()
+}
+
+```
+
+```{r}
+# Function to plot top 10 players by number of passes
+plot_top_10_players <- function(games_df) {
+  
+  # Count the number of passes for each player
+  pass_counts <- games_df %>% group_by(from) %>% summarize(count = n())
+  
+  # Get the top 10 players by number of passes
+  top_10 <- pass_counts %>% top_n(10, wt = count)
+  
+  # Join with players_df to get player names
+  top_10 <- top_10 %>% 
+    left_join(players_df, by = c("from" = "playerId")) %>%
+    mutate(playerName = paste(firstName, lastName))
+  
+  # Create a bar plot for top 10 players
+  ggplot(top_10, aes(x = reorder(playerName, -count), y = count)) +
+    geom_bar(stat = 'identity', fill = 'red') +
+    labs(title = "Top 10 Players by Number of Passes", x = "Player", y = "Number of Passes") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+}
+
+```
+
+```{r}
+# Function to plot heatmap of pass frequencies for a specific match
+plot_pass_frequency_heatmap <- function(games_df, match_id) {
+  
+  # Filter the games dataframe for the specified match
+  match_games <- games_df %>% filter(matchId == match_id)
+  
+  # Prepare data for heatmap
+  heatmap_data <- match_games %>%
+    group_by(from, to) %>%
+    summarise(weight = sum(weight), .groups = 'drop')  # Remove the grouping warning
+  
+  # Convert the data into a matrix format suitable for heatmap
+  heatmap_matrix <- dcast(heatmap_data, from ~ to, value.var = "weight", fill = 0)
+  
+  # Melt the data for ggplot
+  melted_heatmap <- melt(heatmap_matrix, id.vars = "from")
+  
+  # Rename columns to match expected names
+  colnames(melted_heatmap) <- c("from", "to", "value")
+  
+  # Create the heatmap
+  pass_freq_heatmap_plot <- ggplot(melted_heatmap, aes(x = factor(from), y = factor(to), fill = value)) +
+    geom_tile(color = "white") +
+    scale_fill_gradient(low = "white", high = "red") +
+    xlab("Receiver") +
+    ylab("Passer") +
+    ggtitle("Heatmap of Pass Frequencies for Match (Arsenal - Leicester City)") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  return(pass_freq_heatmap_plot)
+}
+
+
+```
+
+```{r}
+# Function to plot heatmap of passes between different player positions
+plot_position_pass_heatmap <- function(games_df) {
+  
+  # Merge the games and players dataframes
+  merged_df <- games_df %>%
+    left_join(players_df, by = c("from" = "playerId")) %>%
+    rename(from_role = role) %>%
+    left_join(players_df, by = c("to" = "playerId")) %>%
+    rename(to_role = role)
+  
+  # Aggregate pass counts by roles
+  role_passes <- merged_df %>%
+    group_by(from_role, to_role) %>%
+    summarise(total_passes = sum(weight), .groups = 'drop')
+  
+  # Pivot data for heatmap
+  heatmap_matrix_by_roles <- role_passes %>%
+    pivot_wider(names_from = to_role, values_from = total_passes, values_fill = list(total_passes = 0))
+  
+  # Melt the data for ggplot
+  melted_heatmap_by_roles <- heatmap_matrix_by_roles %>%
+    pivot_longer(cols = -from_role, names_to = "to_role", values_to = "total_passes")
+  
+  # Plot heatmap
+  pass_pos_heatmap_plot <- ggplot(melted_heatmap_by_roles, aes(x = to_role, y = from_role, fill = total_passes)) +
+    geom_tile() +
+    scale_fill_gradient(low = "white", high = "red") +
+    labs(title = "Heatmap of Passes Between Different Player Positions",
+         x = "To Position",
+         y = "From Position",
+         fill = "Total Passes") +
+    theme_minimal()
+  
+  return(pass_pos_heatmap_plot)
+}
+
+```
+
+```{r}
+# Function to plot the self passes in the game
+plot_self_passes <- function(games_df) {
+  
+  self_passes <- games_df %>%
+    filter(from == to) %>%
+    group_by(from) %>%
+    summarise(self_pass_count = n()) %>%
+    rename(playerId = from) %>%
+    arrange(desc(self_pass_count)) %>%
+    head(15)
+  
+  # Merge with players_df to get player details
+  self_passes_details <- self_passes %>%
+    left_join(players_df, by = "playerId")
+  
+  # Plot the number of self-passes made by each player
+  ggplot(self_passes_details, aes(x = reorder(paste(firstName, lastName), -self_pass_count), y = self_pass_count)) +
+    geom_point(size = 3, color = "red") +
+    labs(
+      title = "Number of Self Passes Made in a Game",
+      x = "Player",
+      y = "Number of Self Passes"
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    coord_flip()
+}
+
+```
+
+```{r}
+# Function to plot total goals scored by each team
+plot_goals_by_team <- function(matches_df, teams_df) {
+  
+  # Summarize goals by team
+  goals_by_team <- matches_df %>%
+    group_by(team_1_teamId) %>%
+    summarise(goals = sum(team_1_score)) %>%
+    rename(teamId = team_1_teamId) %>%
+    bind_rows(
+      matches_df %>%
+        group_by(team_2_teamId) %>%
+        summarise(goals = sum(team_2_score)) %>%
+        rename(teamId = team_2_teamId)
+    ) %>%
+    group_by(teamId) %>%
+    summarise(total_goals = sum(goals)) %>%
+    left_join(teams_df, by = "teamId")
+  
+  # Bar plot of goals by team
+  ggplot(goals_by_team, aes(x = total_goals, y = factor(name), fill = factor(total_goals))) +
+    geom_bar(stat = "identity") +
+    ylab("Team Name") +
+    xlab("Total Goals") +
+    ggtitle("Total Goals Scored by Each Team") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    scale_fill_discrete(name = "Goals")
+}
+
+```
+
+```{r}
+# Define a function to plot team performance over the season
+plot_team_performance <- function(matches_df, teams_df) {
+  
+  # Calculate points for each match
+  matches_df_new <- matches_df %>%
+    mutate(
+      team_1_points = case_when(
+        team_1_score > team_2_score ~ 3,
+        team_1_score == team_2_score ~ 1,
+        TRUE ~ 0
+      ),
+      team_2_points = case_when(
+        team_2_score > team_1_score ~ 3,
+        team_2_score == team_1_score ~ 1,
+        TRUE ~ 0
+      )
+    )
+  
+  # Gather the points data
+  team_points_df <- matches_df_new %>%
+    select(gameweek, teamId = team_1_teamId, points = team_1_points) %>%
+    bind_rows(
+      matches_df_new %>%
+        select(gameweek, teamId = team_2_teamId, points = team_2_points)
+    ) %>%
+    arrange(teamId, gameweek) %>%
+    group_by(teamId) %>%
+    mutate(cumulative_points = cumsum(points)) %>%
+    ungroup()
+  
+  # Join with teams_df to get team names
+  team_points_df <- team_points_df %>%
+    left_join(teams_df, by = c("teamId" = "teamId"))
+  
+  # Line plot of team performance over the season
+  ggplot(team_points_df, aes(x = gameweek, y = cumulative_points, color = name, group = name)) +
+    geom_line() +
+    geom_point() +
+    xlab("Gameweek") +
+    ylab("Cumulative Points") +
+    ggtitle("Team Performance Over the Season") +
+    theme_minimal() +
+    theme(legend.position = "bottom", legend.title = element_blank())
+}
+
+```
+
+```{r}
+# Function to calculate average goals per gameweek
+calculate_average_goals_per_gameweek <- function(matches_df) {
+  average_goals <- matches_df %>%
+    mutate(total_goals = team_1_score + team_2_score) %>%
+    group_by(gameweek) %>%
+    summarise(avg_goals = mean(total_goals), .groups = 'drop')
+  return(average_goals)
+}
+
+# Function to calculate average passes per gameweek
+calculate_average_passes_per_gameweek <- function(games_df, matches_df) {
+  games_df_with_gameweek <- games_df %>%
+    left_join(matches_df %>% select(matchId, gameweek), by = "matchId")
+  
+  total_passes_by_gameweek <- games_df_with_gameweek %>%
+    group_by(gameweek) %>%
+    summarise(total_passes = sum(weight), .groups = 'drop')
+  
+  average_passes <- total_passes_by_gameweek %>%
+    summarise(avg_passes = mean(total_passes), .groups = 'drop')
+  
+  return(total_passes_by_gameweek)
+}
+
+# Function to plot average goals per gameweek
+plot_average_goals_per_gameweek <- function(average_goals) {
+  average_goals_per_gameweek_p <- ggplot(average_goals, aes(x = gameweek, y = avg_goals)) +
+    geom_line(color = "blue") +
+    geom_point(color = "red") +
+    xlab("Gameweek") +
+    ylab("Average Goals") +
+    ggtitle("Average Goals per Gameweek") +
+    theme_minimal()
+}
+
+# Function to plot total passes per gameweek
+plot_total_passes_per_gameweek <- function(total_passes_by_gameweek) {
+  total_passes_per_gameweek_p <- ggplot(total_passes_by_gameweek, aes(x = gameweek, y = total_passes)) +
+    geom_line(color = "blue") +
+    geom_point(color = "red") +
+    xlab("Gameweek") +
+    ylab("Average Passes") +
+    ggtitle("Average Passes per Gameweek") +
+    theme_minimal()
+}
+
+```
+
+```{r}
+# Function to plot match outcomes by gameweek
+plot_match_outcome_by_week <- function(matches_df) {
+  
+  # Categorize match results
+  match_results <- matches_df %>%
+    mutate(result = case_when(
+      team_1_score > team_2_score & team_1_side == "away" ~ "Away Win",
+      team_1_score < team_2_score & team_2_side == "home" ~ "Home Win",
+      team_1_score < team_2_score & team_2_side == "away" ~ "Away Win",
+      TRUE ~ "Draw"
+    )) %>%
+    group_by(gameweek, result) %>%
+    summarise(count = n(), .groups = 'drop') %>%
+    ungroup()
+  
+  # Bar Plot of Match Results by Gameweek
+  ggplot(match_results, aes(x = gameweek, y = count, fill = result)) +
+    geom_bar(stat = "identity", position = "stack") +
+    xlab("Gameweek") +
+    ylab("Number of Matches") +
+    ggtitle("Match Results by Gameweek") +
+    theme_minimal() +
+    scale_fill_manual(values = c("Home Win" = "blue", "Away Win" = "red", "Draw" = "green"))
+}
+
+```
+
+```{r}
+# Function to identify key players based on centrality metrics
+identify_key_players <- function(filtered_games_graph, players_df) {
+  
+  # Calculate centrality metrics
+  degree_centrality <- degree(filtered_games_graph, mode = "all")
+  betweenness_centrality <- betweenness(filtered_games_graph, directed = TRUE)
+  closeness_centrality <- closeness(filtered_games_graph, mode = "all")
+  eigenvector_centrality <- eigen_centrality(filtered_games_graph)$vector
+  
+  # Combine centrality metrics into a data frame
+  centrality_metrics <- data.frame(
+    playerId = as.integer(V(filtered_games_graph)$name),  # Ensure playerId is integer
+    degree = degree_centrality,
+    betweenness = betweenness_centrality,
+    closeness = closeness_centrality,
+    eigenvector = eigenvector_centrality
+  )
+  
+  # Merge with players_df to get player details
+  centrality_metrics <- centrality_metrics %>%
+    left_join(players_df, by = "playerId")
+  
+  # Identify top players based on each centrality metric
+  top_degree <- centrality_metrics %>% top_n(5, degree)
+  top_betweenness <- centrality_metrics %>% top_n(5, betweenness)
+  top_closeness <- centrality_metrics %>% top_n(5, closeness)
+  top_eigenvector <- centrality_metrics %>% top_n(5, eigenvector)
+  
+  # Combine all top players into one data frame
+  top_players <- bind_rows(
+    top_degree %>% mutate(metric = "Degree"),
+    top_betweenness %>% mutate(metric = "Betweenness"),
+    top_closeness %>% mutate(metric = "Closeness"),
+    top_eigenvector %>% mutate(metric = "Eigenvector")
+  )
+  
+  # Remove duplicate entries
+  top_players <- top_players %>% distinct(playerId, .keep_all = TRUE)
+  
+  # Return the key players
+  return(top_players)
+}
+
+
+```
+
+```{r}
+# Function to calculate centrality measures
+calculate_centrality_measures <- function(graph) {
+  
+  data.frame(
+    player = V(graph)$name,
+    degree = degree(graph, mode = "all"),
+    betweenness = betweenness(graph, directed = TRUE),
+    closeness = closeness(graph, mode = "all"),
+    eigenvector = evcent(graph)$vector
+  )
+}
+
+# Function to calculate rank-based correlation with centrality measures and create tables
+rank_based_correlation_with_centrality_measures <- function(games_df, matches_df, players_df, specific_team_id) {
+  
+  # Filter the data for a specific team
+  team_games_df <- games_df %>%
+    filter(teamId == specific_team_id)
+  
+  # Apply the function to each game and store the results
+  centrality_measures_list <- lapply(unique(team_games_df$matchId), function(match_id) {
+    game_data <- team_games_df %>% filter(matchId == match_id)
+    game_graph <- graph_from_data_frame(game_data, directed = TRUE)
+    centrality_measures <- calculate_centrality_measures(game_graph)
+    centrality_measures$matchId <- match_id
+    return(centrality_measures)
+  })
+  
+  centrality_measures_df <- do.call(rbind, centrality_measures_list)
+  
+  # Create a new column playerName in players_df by concatenating firstName and lastName
+  players_df <- players_df %>%
+    mutate(playerName = paste(firstName, lastName))
+  
+  # Ensure the playerId in centrality_measures_df is numeric for the join
+  centrality_measures_df$player <- as.integer(centrality_measures_df$player)
+  
+  # Join with players_df to get player names
+  centrality_measures_df <- centrality_measures_df %>%
+    left_join(players_df %>% select(playerId, playerName), by = c("player" = "playerId"))
+  
+  # Ensure the playerName column is used for the player identification
+  centrality_measures_df <- centrality_measures_df %>%
+    rename(playerId = player) %>%
+    select(matchId, playerId, playerName, degree, betweenness, closeness, eigenvector)
+  
+  ranked_centrality_measures_df <- centrality_measures_df %>%
+    group_by(matchId) %>%
+    mutate(
+      degree_rank = rank(-degree),
+      betweenness_rank = rank(-betweenness),
+      closeness_rank = rank(-closeness),
+      eigenvector_rank = rank(-eigenvector)
+    ) %>%
+    ungroup()
+  
+  # Filter top 10 players based on degree_rank for each match
+  top_players_df <- ranked_centrality_measures_df %>%
+    group_by(matchId) %>%
+    filter(degree_rank <= 10) %>%
+    ungroup()
+  
+  # Function to create tables
+  create_individual_tables <- function(match_id) {
+    match_data <- top_players_df %>%
+      filter(matchId == match_id) %>%
+      select(matchId, playerName, degree_rank, betweenness_rank, closeness_rank, eigenvector_rank)
+    
+    # Perform the join and extract the label
+    match_info <- match_data %>%
+      left_join(matches_df, by = "matchId")
+    
+    # Extract the first label value
+    matchName <- match_info$label[1]
+    
+    match_table <- kable(match_data, format = "html", caption = paste("Player Rankings for Match:", matchName)) %>%
+      kable_styling(full_width = F)
+    
+    return(match_table)
+  }
+  
+  # Create a list of tables for each game
+  tables_list <- lapply(unique(top_players_df$matchId), create_individual_tables)
+  
+  return(tables_list)
+}
+
+```
+
+```{r}
+# Function to create passing network graph for a single match
+create_passing_network_graph <- function(games_df, match_id, players_df) {
+  # Filter the games dataframe for the specified match
+  match_games <- games_df %>% filter(matchId == match_id)
+  
+  # Create the graph
+  games_graph <- graph_from_data_frame(d = match_games, directed = TRUE)
+  
+  # Calculate network metrics
+  density <- graph.density(games_graph)
+  clustering_coefficient <- transitivity(games_graph, type = "global")
+  avg_path_length <- average.path.length(games_graph, directed = TRUE)
+  
+  # Prepare data for plotting
+  node_degree <- degree(games_graph, mode = "all")
+  degree_df <- data.frame(playerId = names(node_degree), degree = node_degree) %>%
+    left_join(players_df %>% mutate(playerId = as.character(playerId)), by = "playerId")
+  
+  # Plot the graph
+  plot <- ggplot(degree_df, aes(x = reorder(paste(firstName, lastName), -degree), y = degree)) +
+    geom_bar(stat = "identity", fill = "red") +
+    xlab("Player") +
+    ylab("Number of Passes Involving Each Player") +
+    ggtitle(paste("Passing Network for Match", match_id)) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), text = element_text(size = 12))
+  
+  # Return the plot and metrics
+  list(
+    plot = plot,
+    metrics = data.frame(
+      matchId = match_id,
+      density = density,
+      clustering_coefficient = clustering_coefficient,
+      avg_path_length = avg_path_length
+    )
+  )
+}
+
+# Function to compare passing networks for multiple matches
+compare_passing_networks <- function(games_df, match_ids, players_df) {
+  # Initialize lists to store plots and metrics
+  plots <- list()
+  metrics <- data.frame()
+  
+  # Generate plots and metrics for each match
+  for (match_id in match_ids) {
+    result <- create_passing_network_graph(games_df, match_id, players_df)
+    plots[[as.character(match_id)]] <- result$plot
+    metrics <- rbind(metrics, result$metrics)
+  }
+  
+  # Return the list of plots and metrics
+  list(
+    plots = plots,
+    metrics = metrics
+  )
+}
+
+```
+
+```{r}
+teams_visulisation(teams_df)
+```
+
+```{r}
+# Create the overall passing network graph
+create_overall_passing_network(filtered_games_df)
+
+```
+
+```{r}
+# Create the filtered passing network for a specific match (example match_id = 1)
+create_filtered_passing_network(games_df, match_id = 2499719)
+
+```
+
+```{r}
+# Plot player interaction counts for a specific match (example match_id = 1)
+plot_player_interaction_counts(games_df, match_id = 2499719)
+
+```
+
+```{r}
+plot_player_role_distribution(players_df)
+
+```
+
+```{r}
+# Plot top 10 players by number of passes
+plot_top_10_players(games_df)
+
+```
+
+```{r}
+pass_counts <- games_df %>% group_by(from) %>% summarize(count = n())
+
+# Histogram for total pass frequency
+ggplot(pass_counts, aes(x = count)) +
+  geom_histogram(binwidth = 15, fill = 'red', color = 'black') +
+  labs(title = "Distribution of Total Passes", x = "Number of Passes", y = "Frequency") +
+  theme_minimal()
+
+```
+
+```{r}
+# Join games_df with players_df to get player type
+pass_counts_with_type <- games_df %>%
+  left_join(players_df %>% select(playerId, role), by = c("from" = "playerId")) %>%
+  group_by(role, from) %>%
+  summarize(count = n(), .groups = 'drop')
+
+# Plot histogram for each player type
+ggplot(pass_counts_with_type, aes(x = count, fill = role)) +
+  geom_histogram(binwidth = 15, color = 'black') +
+  facet_wrap(~ role, scales = "free_y") +
+  labs(title = "Distribution of Total Passes by Player Type", x = "Number of Passes", y = "Frequency") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = c("goalkeeper" = "red", "defender" = "blue", "midfielder" = "green", "forward" = "purple"))
+```
+
+```{r}
+# Plot heatmap of pass frequencies for a specific match (example match_id = 1)
+plot_pass_frequency_heatmap(games_df, match_id = 2499719)
+
+```
+
+```{r}
+# Plot heatmap of passes between different player positions
+plot_position_pass_heatmap(games_df)
+
+```
+
+```{r}
+plot_grid(plot_pass_frequency_heatmap(games_df, match_id = 2499719), plot_position_pass_heatmap(games_df), ncol = 2, align = "h", rel_widths = c(1.5, 1.5))
+
+```
+
+```{r}
+plot_self_passes(games_df)
+
+```
+
+```{r}
+plot_team_performance(matches_df, teams_df)
+```
+
+```{r}
+plot_goals_by_team(matches_df, teams_df)
+
+```
+
+```{r}
+# Calculate average goals per gameweek
+average_goals_by_gameweek <- calculate_average_goals_per_gameweek(matches_df)
+
+# Calculate total passes per gameweek
+total_passes_by_gameweek <- calculate_average_passes_per_gameweek(games_df, matches_df)
+
+# Plotting
+# plot_average_goals_per_gameweek(average_goals_by_gameweek)
+# plot_total_passes_per_gameweek(total_passes_by_gameweek)
+
+plot_grid(plot_average_goals_per_gameweek(average_goals_by_gameweek), plot_total_passes_per_gameweek(total_passes_by_gameweek), ncol = 2, align = "h", rel_widths = c(1.5, 1.5))
+
+```
+
+```{r}
+# Merge the two datasets on gameweek to find the correlation
+merged_data <- average_goals_by_gameweek %>%
+  left_join(total_passes_by_gameweek, by = "gameweek")
+
+# Calculate Pearson correlation
+correlation <- cor(merged_data$avg_goals, merged_data$total_passes, method = "pearson")
+
+print(paste("Pearson correlation between average goals per gameweek and total passes per gameweek:", correlation))
+
+# plot(merged_data$avg_goals, merged_data$total_passes)
+```
+
+```{r}
+# Aggregate number of passes per game
+passes_per_game <- games_df %>%
+  group_by(matchId) %>%
+  summarise(total_passes = sum(weight), .groups = 'drop')
+
+# Aggregate number of goals per game
+goals_per_game <- matches_df %>%
+  mutate(total_goals = team_1_score + team_2_score) %>%
+  group_by(matchId) %>%
+  summarise(total_goals = sum(total_goals), .groups = 'drop')
+
+# Merge the two datasets on matchId
+passes_and_goals <- passes_per_game %>%
+  inner_join(goals_per_game, by = "matchId")
+
+# Calculate Pearson correlation
+correlation <- cor(passes_and_goals$total_passes, passes_and_goals$total_goals, method = "pearson")
+
+print(paste("Pearson correlation between number of passes and number of goals per game: ", correlation))
+
+plot(passes_per_game, goals_per_game)
+```
+
+```{r}
+plot_match_outcome_by_week(matches_df)
+
+```
+
+```{r}
+filtered_games_df <- team_games_df %>% filter(matchId == 2499719)
+filtered_games_graph <- graph_from_data_frame(games_df, directed = TRUE)
+key_players <- identify_key_players(filtered_games_graph, players_df)
+print(key_players)
+
+```
+
+```{r}
+specific_team_id <- 1609
+tables_list <- rank_based_correlation_with_centrality_measures(games_df, matches_df, players_df, specific_team_id)
+for (table in tables_list) {
+   print(table)
+}
+
+```
+
+```{r}
+# Example usage
+match_ids <- c(2499719, 2499720, 2499721) # Replace with actual match IDs you want to compare
+
+# Compare passing networks
+comparison_result <- compare_passing_networks(games_df, match_ids, players_df)
+
+# Display the combined plot
+print(comparison_result$plots)
+
+# Display the network metrics
+print(comparison_result$metrics)
+
+```
+
+```{r}
+
+```
+
+```{r}
+# check jaccard index for same match
+
+game_data <- team_games_df %>% filter(matchId == 2499719)
+g <- graph_from_data_frame(game_data, directed = TRUE)
+
+fully_connected_edges <- as.data.frame(get.edgelist(g))
+actual_edges <- as.data.frame(get.edgelist(g))
+
+intersection <- nrow(merge(fully_connected_edges, actual_edges, by = c("V1", "V2")))
+union <- nrow(fully_connected_edges) + nrow(actual_edges) - intersection
+
+jaccard_index <- intersection / union
+print(jaccard_index)
+
+```
+
+```{r}
+
+# Function to perform the network analysis
+analyze_team_network <- function(team_games_df, players_df, team_id, match_ids) {
+
+  # Convert playerId to character in players_df
+  players_df <- players_df %>%
+    mutate(playerId = as.character(playerId))
+
+  # Function to form the network and calculate metrics until it becomes fully connected
+  form_fully_connected_network <- function(game_data) {
+    # Create a directed graph from the game data
+    g <- graph_from_data_frame(game_data, directed = TRUE)
+    
+    # Assign random weights to edges
+    E(g)$weight <- runif(ecount(g), min = 10, max = 50) |> ceiling()
+    
+    # Get the sorted list of unique weights in descending order
+    pass_list <- E(g)$weight |> sort() |> rev() |> unique()
+    
+    # Initialize an empty subgraph
+    g_temp <- make_empty_graph(n = vcount(g), directed = TRUE)
+    V(g_temp)$name <- V(g)$name
+
+    # Incrementally add edges to the subgraph until it becomes fully connected
+    for(pass_i in pass_list){ 
+      edge_greater_than <- E(g)[weight >= pass_i]
+      g_temp <- subgraph.edges(graph = g, eids = edge_greater_than, delete.vertices = F)
+      if(components(g_temp)$no == 1){ break }
+    }
+    
+    # Calculate in-degree, out-degree, total degree, and eigenvector centrality
+    in_degree <- degree(g_temp, mode = "in")
+    out_degree <- degree(g_temp, mode = "out")
+    total_degree <- degree(g_temp, mode = "all")
+    eigen_centrality <- eigen_centrality(g_temp)$vector
+    
+    # Create a data frame with the results
+    centrality_df <- data.frame(
+      playerId = names(out_degree),
+      in_degree = in_degree,
+      out_degree = out_degree,
+      total_degree = total_degree,
+      eigen_centrality = eigen_centrality
+    )
+    
+    return(list(graph = g_temp, centrality_df = centrality_df))
+  }
+  
+  # Function to calculate metrics for the actual match network
+  calculate_actual_network_metrics <- function(game_data) {
+    # Create a directed graph from the game data
+    g <- graph_from_data_frame(game_data, directed = TRUE)
+    
+    # Calculate in-degree, out-degree, total degree, and eigenvector centrality
+    in_degree <- degree(g, mode = "in")
+    out_degree <- degree(g, mode = "out")
+    total_degree <- degree(g, mode = "all")
+    eigen_centrality <- eigen_centrality(g)$vector
+    
+    # Create a data frame with the results
+    centrality_df <- data.frame(
+      playerId = names(out_degree),
+      in_degree = in_degree,
+      out_degree = out_degree,
+      total_degree = total_degree,
+      eigen_centrality = eigen_centrality
+    )
+    
+    return(list(graph = g, centrality_df = centrality_df))
+  }
+  
+  # Initialize lists to store results
+  fully_connected_results <- list()
+  actual_network_results <- list()
+  
+  # Analyze each match
+  for (match_id in match_ids) {
+    game_data <- team_games_df %>% filter(matchId == match_id)
+    
+    # Analyze the fully connected network
+    fully_connected_results[[as.character(match_id)]] <- form_fully_connected_network(game_data)
+    
+    # Analyze the actual match network
+    actual_network_results[[as.character(match_id)]] <- calculate_actual_network_metrics(game_data)
+  }
+  
+  # Compare the results for various matches and create rankings
+  compare_results <- function(results_list, team_id) {
+    comparison_df <- bind_rows(lapply(names(results_list), function(match_id) {
+      df <- results_list[[match_id]]$centrality_df
+      df %>% 
+        mutate(matchId = match_id, teamId = team_id) %>%
+        left_join(players_df, by = "playerId") %>%
+        arrange(matchId, desc(out_degree), desc(eigen_centrality)) %>%
+        group_by(matchId) %>%
+        mutate(in_degree_rank = row_number(-in_degree),
+               out_degree_rank = row_number(-out_degree),
+               total_degree_rank = row_number(-total_degree),
+               eigen_centrality_rank = row_number(-eigen_centrality)) %>%
+        ungroup()
+    }))
+    
+    return(comparison_df)
+  }
+  
+  fully_connected_comparison <- compare_results(fully_connected_results, team_id)
+  actual_network_comparison <- compare_results(actual_network_results, team_id)
+  
+  # Calculate Jaccard Index between fully connected and actual networks for each match
+  calculate_jaccard_index <- function(fully_connected_graph, actual_graph) {
+    fully_connected_edges <- as.data.frame(get.edgelist(fully_connected_graph))
+    actual_edges <- as.data.frame(get.edgelist(actual_graph))
+    
+    intersection <- nrow(merge(fully_connected_edges, actual_edges, by = c("V1", "V2")))
+    union <- nrow(fully_connected_edges) + nrow(actual_edges) - intersection
+    
+    jaccard_index <- intersection / union
+    return(jaccard_index)
+  }
+  
+  jaccard_indices <- sapply(names(fully_connected_results), function(match_id) {
+    fully_connected_graph <- fully_connected_results[[match_id]]$graph
+    actual_graph <- actual_network_results[[match_id]]$graph
+    
+    calculate_jaccard_index(fully_connected_graph, actual_graph)
+  })
+  
+  jaccard_df <- data.frame(
+    matchId = names(jaccard_indices),
+    jaccard_index = jaccard_indices
+  )
+  
+  # Determine the central players for each team and match
+  central_players <- actual_network_comparison %>%
+    group_by(matchId) %>%
+    top_n(3, wt = eigen_centrality) %>%
+    ungroup() %>%
+    select(matchId, teamId, playerId, eigen_centrality) %>%
+    left_join(players_df, by = "playerId") %>%
+    arrange(matchId)
+  
+  # Check if the central players are the same across matches
+  central_player_consistency <- central_players %>%
+    group_by(playerId, role) %>%
+    summarize(match_count = n()) %>%
+    arrange(desc(match_count))
+  
+  # Determine the position of the central player in the majority of matches
+  central_player_position <- central_players %>%
+    group_by(role) %>%
+    summarize(count = n()) %>%
+    arrange(desc(count))
+  
+  # Identify if the same top 3 players appear in every match
+  top_3_players_per_match_ec <- function(comparison_df) {
+    top_3 <- comparison_df %>%
+      group_by(matchId) %>%
+      top_n(3, wt = eigen_centrality) %>%
+      ungroup() %>%
+      arrange(matchId, desc(eigen_centrality))
+    
+    consistent_top_3 <- top_3 %>%
+      group_by(playerId, lastName, role) %>%
+      summarize(match_count = n()) %>%
+      # filter(match_count == length(match_ids)) %>%
+      arrange(desc(match_count))
+    
+    return(list(top_3 = top_3, consistent_top_3 = consistent_top_3))
+  }
+  
+  top_3_players_per_match_id <- function(comparison_df) {
+    top_3 <- comparison_df %>%
+      group_by(matchId) %>%
+      top_n(3, wt = in_degree) %>%
+      ungroup() %>%
+      arrange(matchId, desc(in_degree))
+    
+    consistent_top_3 <- top_3 %>%
+      group_by(playerId, lastName, role) %>%
+      summarize(match_count = n()) %>%
+      # filter(match_count == length(match_ids)) %>%
+      arrange(desc(match_count))
+    
+    return(list(top_3 = top_3, consistent_top_3 = consistent_top_3))
+  }
+  
+  top_3_players_per_match_od <- function(comparison_df) {
+    top_3 <- comparison_df %>%
+      group_by(matchId) %>%
+      top_n(3, wt = out_degree) %>%
+      ungroup() %>%
+      arrange(matchId, desc(out_degree))
+    
+    consistent_top_3 <- top_3 %>%
+      group_by(playerId, lastName, role) %>%
+      summarize(match_count = n()) %>%
+      # filter(match_count == length(match_ids)) %>%
+      arrange(desc(match_count))
+    
+    return(list(top_3 = top_3, consistent_top_3 = consistent_top_3))
+  }
+  
+  top_3_players_per_match_td <- function(comparison_df) {
+    top_3 <- comparison_df %>%
+      group_by(matchId) %>%
+      top_n(3, wt = total_degree) %>%
+      ungroup() %>%
+      arrange(matchId, desc(total_degree))
+  
+    consistent_top_3 <- top_3 %>%
+      group_by(playerId, lastName, role) %>%
+      summarize(match_count = n()) %>%
+      # filter(match_count == length(match_ids)) %>%
+      arrange(desc(match_count))
+    
+    return(list(top_3 = top_3, consistent_top_3 = consistent_top_3))
+  }
+  
+  fully_connected_top_3_ec <- top_3_players_per_match_ec(fully_connected_comparison)
+  actual_network_top_3_ec <- top_3_players_per_match_ec(actual_network_comparison)
+  fully_connected_top_3_id <- top_3_players_per_match_id(fully_connected_comparison)
+  actual_network_top_3_id <- top_3_players_per_match_id(actual_network_comparison)
+  fully_connected_top_3_od <- top_3_players_per_match_od(fully_connected_comparison)
+  actual_network_top_3_od <- top_3_players_per_match_od(actual_network_comparison)
+  fully_connected_top_3_td <- top_3_players_per_match_td(fully_connected_comparison)
+  actual_network_top_3_td <- top_3_players_per_match_td(actual_network_comparison)
+  
+  # Calculate Jaccard Index between fully connected and actual networks for each centrality measure
+  calculate_jaccard_index_centrality <- function(comparison_df, centrality_measures) {
+  jaccard_indices <- matrix(0, nrow = length(centrality_measures), ncol = length(centrality_measures),
+                            dimnames = list(centrality_measures, centrality_measures))
+  
+  for (i in seq_along(centrality_measures)) {
+    for (j in seq_along(centrality_measures)) {
+      measure1 <- centrality_measures[i]
+      measure2 <- centrality_measures[j]
+      
+      top_players_measure1 <- comparison_df %>%
+        group_by(matchId) %>%
+        top_n(3, wt = !!sym(measure1)) %>%
+        pull(playerId)
+      
+      top_players_measure2 <- comparison_df %>%
+        group_by(matchId) %>%
+        top_n(3, wt = !!sym(measure2)) %>%
+        pull(playerId)
+      
+      intersection <- length(intersect(top_players_measure1, top_players_measure2))
+      union <- length(unique(c(top_players_measure1, top_players_measure2)))
+      
+      jaccard_indices[i, j] <- intersection / union
+    
+    }
+  }
+  
+  return(as.data.frame(as.table(jaccard_indices)))
+}
+
+  centrality_measures <- c("eigen_centrality", "in_degree", "out_degree", "total_degree")
+  jaccard_indices_centrality_df <- calculate_jaccard_index_centrality(actual_network_comparison, centrality_measures)
+
+  
+  list(
+    fully_connected_comparison = fully_connected_comparison,
+    actual_network_comparison = actual_network_comparison,
+    jaccard_df = jaccard_df,
+    central_players = central_players,
+    central_player_consistency = central_player_consistency,
+    central_player_position = central_player_position,
+    fully_connected_top_3_ec = fully_connected_top_3_ec,
+    actual_network_top_3_ec = actual_network_top_3_ec,
+    fully_connected_top_3_id = fully_connected_top_3_id,
+    actual_network_top_3_id = actual_network_top_3_id,
+    fully_connected_top_3_od = fully_connected_top_3_od,
+    actual_network_top_3_od = actual_network_top_3_od,
+    fully_connected_top_3_td = fully_connected_top_3_td,
+    actual_network_top_3_td = actual_network_top_3_td,
+    jaccard_indices_centrality = jaccard_indices_centrality_df
+  )
+}
+
+# Sample usage
+team_id <- 1609
+team_games_df <- games_df %>% filter(teamId == team_id)
+match_ids <- unique(team_games_df$matchId)
+
+# Analyze the network for the specified team
+network_analysis_results <- analyze_team_network(team_games_df, players_df, team_id, match_ids)
+
+
+# Display the results
+print("Jaccard Index between Centrality Measures:")
+print(network_analysis_results$jaccard_indices_centrality)
+
+```
+
+```{r}
+# Generate the tile plot
+ggplot(network_analysis_results$jaccard_indices_centrality, aes(x = Var1, y = Var2, fill = Freq)) + 
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "blue", limits = c(0, 1)) +
+  theme_minimal() +
+  labs(title = "Comparison of similarity between the centrality measures", x = "Var1", y = "Var2")
+```
+
+```{r}
+# Plot top 3 players per match for Fully Connected Network
+ggplot(network_analysis_results$fully_connected_top_3_ec$top_3, aes(x = matchId, y = reorder(lastName, -eigen_centrality), fill = eigen_centrality)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(title = "Eigen Vector Centrality of Players in Each Game(Fully Connected Network)",
+       x = "Match ID",
+       y = "Player Name",
+       fill = "Eigen Centrality") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+  
+
+# Plot top 3 players per match for Actual Network
+ggplot(network_analysis_results$actual_network_top_3_ec$top_3, aes(x = matchId, y = reorder(lastName, -eigen_centrality), fill = eigen_centrality)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(title = "Eigen Vector Centrality of Players in Each Game",
+       x = "Match ID",
+       y = "Player Name",
+       fill = "Eigen Centrality") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+# Plot top 3 players per match for Fully Connected Network
+ggplot(network_analysis_results$fully_connected_top_3_td$top_3, aes(x = matchId, y = reorder(lastName, -total_degree), fill = total_degree)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(title = "Total Degree Centrality of Players in Each Game (Fully Connected Network) ",
+       x = "Match ID",
+       y = "Player Name",
+       fill = "Total Degree") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+  
+
+# Plot top 3 players per match for Actual Network
+ggplot(network_analysis_results$actual_network_top_3_td$top_3, aes(x = matchId, y = reorder(lastName, -total_degree), fill = total_degree)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(title = "Total Degree Centrality of Players in Each Game",
+       x = "Match ID",
+       y = "Player Name",
+       fill = "Total Degree") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+```
+
+```{r}
+# Plot consistent top 3 players for Fully Connected Network
+ggplot(network_analysis_results$fully_connected_top_3_ec$consistent_top_3, aes(x = reorder(lastName, -match_count), y = match_count, fill = role)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Consistent Top 3 Players (Fully Connected Network) EigenCentrality",
+       x = "Player Name",
+       y = "Match Count",
+       fill = "Role") +
+  theme_minimal() +
+  coord_flip()
+
+# Plot consistent top 3 players for Actual Network
+ggplot(network_analysis_results$actual_network_top_3_ec$consistent_top_3, aes(x = reorder(lastName, -match_count), y = match_count, fill = role)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Consistent Top 3 Players (Actual Network) EigenCentrality",
+       x = "Player Name",
+       y = "Match Count",
+       fill = "Role") +
+  theme_minimal() +
+  coord_flip()
+
+# Plot consistent top 3 players for Fully Connected Network
+ggplot(network_analysis_results$fully_connected_top_3_td$consistent_top_3, aes(x = reorder(lastName, -match_count), y = match_count, fill = role)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Consistent Top 3 Players (Fully Connected Network) Total Degree",
+       x = "Player Name",
+       y = "Match Count",
+       fill = "Role") +
+  theme_minimal() +
+  coord_flip()
+
+# Plot consistent top 3 players for Actual Network
+ggplot(network_analysis_results$actual_network_top_3_td$consistent_top_3, aes(x = reorder(lastName, -match_count), y = match_count, fill = role)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Consistent Top 3 Players (Actual Network) Total Degree",
+       x = "Player Name",
+       y = "Match Count",
+       fill = "Role") +
+  theme_minimal() +
+  coord_flip()
+
+```
+
+```{r}
+# Function to aggregate findings across all teams
+aggregate_team_network_analysis <- function(all_teams_games_df, players_df) {
+  all_team_ids <- unique(all_teams_games_df$teamId)
+
+  all_results <- lapply(all_team_ids, function(team_id) {
+    team_games_df <- all_teams_games_df %>% filter(teamId == team_id)
+    match_ids <- unique(team_games_df$matchId)
+
+    analyze_team_network(team_games_df, players_df, team_id, match_ids)
+  })
+
+  # Combine all results into a single data frame for analysis
+  fully_connected_comparisons <- bind_rows(lapply(all_results, `[[`, "fully_connected_comparison"))
+  actual_network_comparisons <- bind_rows(lapply(all_results, `[[`, "actual_network_comparison"))
+  # jaccard_dfs <- bind_rows(lapply(all_results, `[[`, "jaccard_df"))
+  # central_players <- bind_rows(lapply(all_results, `[[`, "central_players"))
+  # central_player_consistencies <- bind_rows(lapply(all_results, `[[`, "central_player_consistency"))
+  # central_player_positions <- bind_rows(lapply(all_results, `[[`, "central_player_position"))
+
+  # Find the ranking of the top 3 players across all teams
+  # top_3_players_ranking <- actual_network_comparisons %>%
+  #   group_by(teamId, playerId, firstName, lastName) %>%
+  #   summarize(eigen_centrality = mean(eigen_centrality)) %>%
+  #   arrange(desc(eigen_centrality))
+
+  # Calculate the average number of passes per game for each top player
+  top_players_average_passes <- actual_network_comparisons %>%
+    group_by(teamId, playerId, firstName, lastName) %>%
+    summarize(average_passes_per_game = mean(total_degree)) %>%
+    arrange(desc(average_passes_per_game))
+  
+  # Plot a histogram of the average passes per game
+  plot_histogram <- function(data) {
+    ggplot(data, aes(x = average_passes_per_game)) +
+      geom_histogram(binwidth = 1, fill = "blue", color = "black", alpha = 0.7) +
+      labs(title = "Average Passes per Game by Players",
+           x = "Average Passes per Game",
+           y = "Frequency") +
+      theme_minimal()
+  }
+  
+  list(
+    fully_connected_comparisons = fully_connected_comparisons,
+    actual_network_comparisons = actual_network_comparisons,
+    # jaccard_dfs = jaccard_dfs,
+    # central_players = central_players,
+    # central_player_consistencies = central_player_consistencies,
+    # central_player_positions = central_player_positions,
+    # top_3_players_ranking = top_3_players_ranking,
+    top_players_average_passes = top_players_average_passes,
+    plot_histogram = plot_histogram(top_players_average_passes)
+  )
+
+}
+
+# Sample usage
+all_teams_games_df <- games_df
+
+# Perform aggregated analysis across all teams
+aggregated_analysis_results <- aggregate_team_network_analysis(all_teams_games_df, players_df)
+
+# Display the aggregated results
+# print(aggregated_analysis_results$top_3_players_ranking)
+print(aggregated_analysis_results$top_players_average_passes)
+
+# Plot the histogram of average passes per game
+print(aggregated_analysis_results$plot_histogram)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
